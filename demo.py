@@ -12,6 +12,7 @@ import glob
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+import time
 
 from IPython import embed
 
@@ -39,7 +40,7 @@ def get_data(img_s_path_list, mask_s_path_list, img_q_path):
 
     for i in range(n_shot):
         img_s = Image.open(img_s_path_list[i]).convert('RGB')
-        mask_s = Image.fromarray(np.array(Image.open(mask_s_path_list[i])))
+        mask_s = np.array(Image.open(mask_s_path_list[i]))
 
         img_s_list.append(img_s)
         mask_s_list.append(mask_s)
@@ -65,7 +66,8 @@ def evaluate(model):
         img_s_list[k], mask_s_list[k] = img_s_list[k].cuda(), mask_s_list[k].cuda()
 
     with torch.no_grad():
-        pred_bchw = model(img_s_list, mask_s_list, img_q, None)[0]
+        model.eval_register_support(img_s_list, mask_s_list)
+        pred_bchw = model.eval_infer_one(img_q)[0]
         pred_bhw = torch.argmax(pred_bchw, dim=1)
     
     for b in range(pred_bhw.shape[0]):
@@ -87,10 +89,9 @@ def main():
     #print(model)
     print('\nParams: %.1fM' % count_params(model))
 
-    best_model = DataParallel(model).cuda()
-
+    model = model.cuda()
     model.eval()
-    evaluate(best_model)
+    evaluate(model)
 
 if __name__ == '__main__':
     main()

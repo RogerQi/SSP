@@ -12,6 +12,81 @@ class SSP_MatchingNet(nn.Module):
         self.layer0 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
         self.layer1, self.layer2, self.layer3 = backbone.layer1, backbone.layer2, backbone.layer3
         self.refine = refine
+    
+    def eval_register_support(self, img_s_list, mask_s_list):
+        # feature maps of support images
+        feature_s_list = []
+        for k in range(len(img_s_list)):
+            with torch.no_grad():
+                s_0 = self.layer0(img_s_list[k])
+                s_0 = self.layer1(s_0)
+            s_0 = self.layer2(s_0)
+            s_0 = self.layer3(s_0)
+            feature_s_list.append(s_0)
+            del s_0
+        
+        # foreground(target class) and background prototypes pooled from K support features
+        feature_fg_list = []
+        feature_bg_list = []
+        supp_out_ls = []
+        for k in range(len(img_s_list)):
+            feature_fg = self.masked_average_pooling(feature_s_list[k],
+                                                               (mask_s_list[k] == 1).float())[None, :]
+            feature_bg = self.masked_average_pooling(feature_s_list[k],
+                                                               (mask_s_list[k] == 0).float())[None, :]
+            feature_fg_list.append(feature_fg)
+            feature_bg_list.append(feature_bg)
+
+        # average K foreground prototypes and K background prototypes
+        self.FP = torch.mean(torch.cat(feature_fg_list, dim=0), dim=0).unsqueeze(-1).unsqueeze(-1)
+        self.BP = torch.mean(torch.cat(feature_bg_list, dim=0), dim=0).unsqueeze(-1).unsqueeze(-1)
+
+    def eval_infer_one(self, img_q):
+        h, w = img_q.shape[-2:]
+        FP = self.FP
+        BP = self.BP
+        # feature map of query image
+        with torch.no_grad():
+            q_0 = self.layer0(img_q)
+            q_0 = self.layer1(q_0)
+        q_0 = self.layer2(q_0)
+        feature_q = self.layer3(q_0)
+
+        # measure the similarity of query features to fg/bg prototypes
+        out_0 = self.similarity_func(feature_q, FP, BP)
+
+        ##################### Self-Support Prototype (SSP) #####################
+        SSFP_1, SSBP_1, ASFP_1, ASBP_1 = self.SSP_func(feature_q, out_0)
+        
+        FP_1 = FP * 0.5 + SSFP_1 * 0.5
+        BP_1 = SSBP_1 * 0.3 + ASBP_1 * 0.7
+
+        out_1 = self.similarity_func(feature_q, FP_1, BP_1)
+
+        ##################### SSP Refinement #####################
+        if self.refine:
+            SSFP_2, SSBP_2, ASFP_2, ASBP_2 = self.SSP_func(feature_q, out_1)
+
+            FP_2 = FP * 0.5 + SSFP_2 * 0.5
+            BP_2 = SSBP_2 * 0.3 + ASBP_2 * 0.7
+
+            FP_2 = FP * 0.5 + FP_1 * 0.2 + FP_2 * 0.3
+            BP_2 = BP * 0.5 + BP_1 * 0.2 + BP_2 * 0.3
+
+            out_2 = self.similarity_func(feature_q, FP_2, BP_2)
+
+            out_2 = out_2 * 0.7 + out_1 * 0.3
+
+        #out_0 = F.interpolate(out_0, size=(h, w), mode="bilinear", align_corners=True)
+        out_1 = F.interpolate(out_1, size=(h, w), mode="bilinear", align_corners=True)
+
+        if self.refine:
+            out_2 = F.interpolate(out_2, size=(h, w), mode="bilinear", align_corners=True)
+            out_ls = [out_2, out_1]
+        else:
+            out_ls = [out_1]
+
+        return out_ls
 
     def forward(self, img_s_list, mask_s_list, img_q, mask_q):
         h, w = img_q.shape[-2:]
